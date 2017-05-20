@@ -1,0 +1,190 @@
+---
+title: "Practical Machine Learning Report"
+author: "Kenneth W. Moffett"
+date: "May 20, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Technical Notes
+
+This set of code presumes two things. First, the caret, ggplot2, randomForest, e1071, and reshape2 packages must be installed for this code to run correctly. Second, the datasets (testing and training) should exist in the same directory as this code file.
+
+# Executive Summary
+
+In this assignment, we will first load the dataset, three required libraries (caret, ggplot2 and reshape), clean the data, and conduct a machine learning analysis to predict the type of actviity that was performed based on sensor activity (Groupware LES 2017). When we use a random forest model on the cleaned training dataset, validate it using k-fold validation, and then, predict the classe using the testing data, we obtain a prediction model that is over 99% accurate, with an out of sample error of less than 1%.
+
+# Load the Datasets
+
+To perform our analysis, we first must load the training and testing datasets as csv files.
+
+```{r}
+trainingdata <- read.csv("pml-training.csv", header = TRUE)
+testingdata <- read.csv("pml-testing.csv", header = TRUE)
+```
+
+# Load Required Packages
+
+There are three required packages in this sequence: caret, ggplot2, and reshape2.
+
+```{r}
+library(caret)
+library(ggplot2)
+library(reshape2)
+```
+
+# Clean Data
+
+There are several issues in the training dataset that need to be resolved before successfully completing the analysis. First, many variables in the training set have such a high number of NA values that they cannot reliably be used to predict our dependent variable (classe). Second, there are five variables (X, user_name, raw_time_stamp_part_1, raw_timestamp_part_2, and cvtd_timestamp) that are extraneous as we are not analyzing a time series dataset. These variables need to be deleted from the data frame from which we construct our prediction model. Third, the remaining variables (except for classe) are numeric variables, and need to be coerced as such. 
+
+## Clean Training Data
+
+```{r}
+trainingdata <- trainingdata[, -c(1:5)]
+trainingdata2 <- as.data.frame(lapply(trainingdata,as.numeric))
+classe <- trainingdata$classe
+trainingdata <- trainingdata2
+trainingdata <- trainingdata[colSums(is.na(trainingdata)) < 13000]
+trainingdata$classe <- classe
+``` 
+
+These issues are resulted with the above code by first removing the first five extraneous columns, then, making all remaining variables numeric. Then, the classe element is eextracted from the original training dataset as a separate object, which then overwrites the classe variable that was transformed as a numeric object earlier back to what it was originally. Finally, all of the columns with 13,000 or more NA values are removed from the data.
+
+## Clean Testing Data
+
+However, this by no means completes the cleaning routines for the datasets, as the testing data must mirror the training data in terms of the possible predictors. This is done so that we can apply the model created and validated using the training data on the testing data to predict classe. To begin, we create a character vector that consists of all of the column names in the training dataset less the classe column (because that variable is not in the testing data). Then, all columns in the testing data that are not in the training data are deleted. Moreover, the remaing columns are coerced as numeric objects, as all are numeric variables. Yet, some columns in the testing data have variables that have all NA values and need to be deleted. Those columns are deleteted when they have 1 or more NA values in them. The code below implements these routines.
+
+```{r}
+trainingcolnames <- as.character(colnames(trainingdata))
+trainingcolnames <- trainingcolnames[-88]
+testingdata <- testingdata[, names(testingdata) %in% trainingcolnames]
+testingdata <- as.data.frame(lapply(testingdata,as.numeric))
+testing <- testingdata
+testing <- testing[colSums(is.na(testing)) < 1]
+```
+
+## Clean Training Data to Match Testing Data
+
+When we clean the data in this way, though, we have a problem: the testing data frame has 54 predictors while the training data has 87. To make these consistent so that the same model can be applied, we need to prune all predictors that are not in the testing dataset. To begin, we create a character vector that comprises all of the columns in the testing dataset. Then, we eliminate all variables that are not in the testing dataset. However, we must reincorporate the classe variable into the training data, as we do not want to exclude our dependent variable. Finally, there is one column that needs to be deleted: new_window because there is little to no variance in it. Thus, it is useless as a predictor.
+
+```{r}
+testingcolnames <- as.character(colnames(testing))
+trainingdata <- trainingdata[, names(trainingdata) %in% testingcolnames]
+trainingdata$classe <- classe
+dropcolumns <- "new_window"
+trainingdata <- trainingdata[, !names(trainingdata) %in% dropcolumns]
+testing <- testing[, !names(testing) %in% dropcolumns]
+``` 
+
+This routine gives us a training dataset with 54 variables, and a testing dataset with 53 independent variables. To be consistent, we apply all of these same routines to the validation dataset.
+
+# Subdivide Training Data into Training and Validation Sets
+
+To successfully perform machine learning, one must subdivide the training dataset into the training data and the validation data now that the data are cleaned. This data is subdivided by using the 23456 seed so that this and all subsequent analyses are reproducible. Further, 70% of the training dataset is assigned to the the training data to fit the model, and 30% is used to validate that model. Finally, we remove several objects that were created previously, as they are no longer needed to execute the remaining code.
+
+```{r}
+set.seed = 23456
+inTrain <- createDataPartition(y = trainingdata$classe, p = .7, list = FALSE)
+training <- trainingdata[inTrain, ]
+validation <- trainingdata[-inTrain, ]
+rm(inTrain, testingdata, trainingdata, trainingdata2, classe, dropcolumns, testingcolnames, trainingcolnames)
+```
+
+# Check for Collinearity
+
+To verify whether a principal components analysis (PCA) needs to be incorporated into the model (due to collinear variables), we run a correlation matrix. To run the correlation matrix in a visually appealing way, we first correlate all independent variables against each other in the training dataset. Then, we create a correlation matrix by melting the correlation values into one-by-one sets where each set is an observation. Further, we compute the absolute value of the correlation statistic, as we are interested in the extent to which the variables are highly correlated, not the direction of that correlation. Then, we run code that gives us the lower triangle of the correlation matrix and eliminates the upper triangle (as that is just a mirror image of the lower triangle).
+
+```{r}
+cormatrix <- round(cor(training[, -54]), 2)
+meltedcormatrix <- melt(cormatrix)
+meltedcormatrix$value = abs(meltedcormatrix$value)
+lower_triangle <- function(cormatrix){
+    cormatrix[upper.tri(cormatrix)] <- NA
+    cormatrix
+}
+lowertriangle <- lower_triangle(cormatrix)
+lowertriangle <- melt(lowertriangle, na.rm = TRUE)
+```
+
+## Visualize Correlation Matrix
+
+Once we have created our lower triangle, we plot the correlation matrix using the ggplot command where blue values indicate low correlations, white values indidate moderate ones, and red values indicate highly correlated predictors. The vertical and horizontal axes are the predictors.
+
+```{r}
+p1 <- ggplot(data = lowertriangle, aes(Var1, Var2, fill = value)) + geom_tile(color = "white") + scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = .5, limit = c(0, 1), space = "Lab", name = "Correlation") + theme_minimal() + coord_fixed() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+print(p1)
+rm(cormatrix, meltedcormatrix, lowertriangle, lower_triangle, p1)
+```
+
+The visualized correlation matrix tells us that most of the predictors are not correlated with one another to disturb model coefficients. While there are a few highly correlated predictors, there are not enough to justify a PCA approach as this would yield very little improvement in the explanatory power of the model. In addition, running a random forest model without a PCA is much faster than one that includes the PCA. Further, the random forest model without a PCA is easier to interpret when we discuss the results. Finally, I removed several objects that will no longer be used as we go so that we can decrease computation time in the model.
+
+# Do Prediction Using a Random Forest
+
+Now that the data are cleaned and we have checked for collinearity, we run our random forest model to generate our predictions. I used a random forest model because it is a very accurate model that deals well with nonlinear dependent variables. In this case, the dependent variable (classe) is measured nominally, with discrete choice options that are neither ordered nor binary.
+
+Also, this model creates multiple classification trees and averages them to arrive at our outcome. This algorithm also allows us to obtain reliable estimates of our variable importance and out of sample error (Shih 2017). Further, this algorithm is effective at dealing with any issues that arise from collinear or multicollinear variables (Shih 2017).
+
+Finally, I include k-fold cross validation (with 3 folds) as part of the routine. Once the random forest model is run, we predict classe using the validation data to learn how well the model performs before using it on an alternative (testing) dataset.
+
+```{r}
+set.seed = 23456
+m1 <- train(classe ~ ., data = training, method = "rf", prox = TRUE, trControl = trainControl(method = "cv", number = 3), importance = TRUE)
+pred1 <- predict(m1, validation)
+```
+
+# Compute Model Accuracy
+
+There are three things that we can do to verify the accuracy of the model that we have computed. First, we need to compute the accuracy of the model on the validation data by generating a confusion matrix.
+
+```{r}
+confmatrix <- confusionMatrix(validation$classe, pred1)
+print(confmatrix)
+```
+
+When we compute the Accuracy of the random forest model that we have estimated, we discover that the model is over 99% accurate in its predictions, with a Kappa value exceeding .99.
+
+```{r}
+outsampleerror <- 1-confmatrix$overall['Accuracy']
+print(outsampleerror)
+```
+
+We also compute the out of sample error to give a sense of the expected error if we predict using the model outside of our sample. The out of sample error is quite low, as illustrated above.
+
+# Plot Accuracy by Number of Randomly Selected Predictors Using Cross-Validation
+
+Yet, looking at the accuracy of our model without getting a more developed sense of the model is not a good option because we need to learn how accurate our model is when we do a crossvalidation by the number of predictors that are used.
+
+```{r}
+p2 <- plot(m1, metric = "Accuracy")
+print(p2)
+```
+
+This plot shows the accuracy of our model using a cross-validation approach, with the vertical axis being accuracy and the horizontal axis being the number of randomly selected predictors. We find that accuracy increases as we increase the number of predictors until we reach 27 predictors (and an approximately .995 accuracy). When we include more than 27 predictors, the accuracy of the model drops slightly. The decrease after 27 predictors happens because of including a few variables that are correlated with one another. When variables that are correlated with one another are included in the model, the explanatory power of that model ends up being reduced slightly. This is exactly what happens here.
+
+## Plot the Most Important Predictors
+
+To learn what factors drive each of the classe options, we generate a plot that tells us the top 20 predictors, and how much of an effect each one of them had on our results.
+
+```{r}
+m1Imp <- varImp(m1, scale = FALSE)
+p3 <- plot(m1Imp, top =20)
+print(p3)
+```
+
+In this visualization by each classe, we have the top 20 predictors as the vertical axis, and a measure of importance for the horizontal acis. In this chart, we learn that there are  5 or 6 predictors that are consistent "top performers" with respect to building a model and others increase the accuracy of the model, but not nearly to the extent as those top 5 or 6 predictors.
+
+# Predict Using Model on Testing Data
+
+Then, we predict the classe for each of 20 participants, given the model that we estimated using the training data and validated using the validation data. To predict the classe for each of 20 participants, we use the testing data to generate our predicted classe for each of them, given the model estimated using the training data.
+
+```{r}
+pred2 <- predict(m1, testing)
+print(pred2)
+```
+
+# Works Cited
+
+Groupware 2017. Description of Human Activity Recognition Dataset. Available at http://groupware.les.inf.puc-rio.br/har. Accessed on May 20, 2017.
+
+Shih, Stephanie 2017. "Class 13a: Random Forests, for Model (and Predictor) Selection" Available at http://cogsci.ucmerced.edu/shih/shih_randomforests.pdf. Accessed on May 20. 2017.
